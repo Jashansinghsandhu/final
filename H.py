@@ -77,6 +77,7 @@ escrow_deals = {} # To hold active escrow deals
 group_settings = {} # NEW: To hold group configurations
 recovery_data = {} # NEW: To hold recovery token data
 gift_codes = {} # NEW: To hold gift code data
+withdrawal_requests = {} # NEW: To hold pending withdrawal requests
 
 # --- Global Control Flag ---
 bot_stopped = False
@@ -191,7 +192,8 @@ def get_text(key, lang_code, **kwargs):
  ADMIN_BROADCAST_MESSAGE, ADMIN_SET_HOUSE_BALANCE, ADMIN_LIMITS_CHOOSE_TYPE,
  ADMIN_LIMITS_CHOOSE_GAME, ADMIN_LIMITS_SET_AMOUNT,
  SETTINGS_RECOVERY_PIN, RECOVER_ASK_TOKEN, RECOVER_ASK_PIN,
- ADMIN_GIFT_CODE_AMOUNT, ADMIN_GIFT_CODE_CLAIMS) = range(19)
+ ADMIN_GIFT_CODE_AMOUNT, ADMIN_GIFT_CODE_CLAIMS, SETTINGS_WITHDRAWAL_ADDRESS, SETTINGS_WITHDRAWAL_ADDRESS_CHANGE,
+ WITHDRAWAL_AMOUNT, WITHDRAWAL_APPROVAL_TXID) = range(23)
 
 # --- GAME MULTIPLIERS AND CONFIGS ---
 
@@ -1044,14 +1046,35 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
+        # Check if withdrawal address is set
+        withdrawal_address = user_stats[user.id].get("withdrawal_address")
+        if not withdrawal_address:
+            await query.edit_message_text(
+                "💳 <b>Withdrawal Address Not Set</b>\n\n"
+                "Please set your USDT-BEP20 withdrawal address in Settings first before requesting a withdrawal.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Go to Settings", callback_data="main_settings")],
+                    [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")]
+                ])
+            )
+            return
+
+        # Ask for withdrawal amount
+        user_currency = get_user_currency(user.id)
+        formatted_balance = format_currency(user_wallets.get(user.id, 0.0), user_currency)
+        
         await query.edit_message_text(
-            "💸 <b>Withdrawals</b>\n\n"
-            "For withdrawal requests, please contact the bot owner:\n"
-            "👤 @jashanxjagy\n\n"
-            "Include your user ID and withdrawal amount in your message.",
+            f"💸 <b>Withdrawal Request</b>\n\n"
+            f"<b>Current Balance:</b> {formatted_balance}\n"
+            f"<b>Withdrawal Address:</b> <code>{withdrawal_address}</code>\n\n"
+            f"Please enter the amount you want to withdraw in {user_currency}.\n"
+            f"Type 'all' to withdraw your entire balance.",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_to_main")]])
         )
+        context.user_data['withdrawal_flow'] = True
+        return WITHDRAWAL_AMOUNT
 
     elif data == "main_games":
         await games_menu(update, context)
@@ -1194,34 +1217,36 @@ async def start_command_inline(query, context):
     await ensure_user_in_wallets(user.id, user.username, context=context)
     context.user_data['menu_owner_id'] = user.id # NEW: Set menu owner
 
+    # Get user's preferred currency
+    user_currency = get_user_currency(user.id)
+    formatted_balance = format_currency(user_wallets.get(user.id, 0.0), user_currency)
+
+    # NEW UI STRUCTURE - Simplified and reorganized
     keyboard = [
+        # Row 1: Deposit and Withdraw (Horizontal)
         [InlineKeyboardButton("💰 Deposit", callback_data="main_deposit"),
          InlineKeyboardButton("💸 Withdraw", callback_data="main_withdraw")],
-        [InlineKeyboardButton("🎮 Games", callback_data="main_games"),
-         InlineKeyboardButton("🛡️ Escrow", callback_data="main_escrow")],
-        [InlineKeyboardButton("💼 Wallet", callback_data="main_wallet"),
-         InlineKeyboardButton("📈 Leaderboard", callback_data="main_leaderboard")],
-        [InlineKeyboardButton("🤝 Referral", callback_data="main_referral"),
-         InlineKeyboardButton("🦄 Level", callback_data="main_level")], # MODIFIED
-        [InlineKeyboardButton("🤖 AI Assistant", callback_data="main_ai"),
-         InlineKeyboardButton("🆘 Support", callback_data="main_support")],
-        [InlineKeyboardButton("❓ Help", callback_data="main_help"),
-         InlineKeyboardButton("ℹ️ Info & Rules", callback_data="main_info")],
+        # Row 2: Games (Single button)
+        [InlineKeyboardButton("🎮 Games", callback_data="main_games")],
+        # Row 3: More (All other features)
+        [InlineKeyboardButton("➕ More", callback_data="main_more")],
+        # Row 4: Settings (Single button, only in DMs)
     ]
+
     # Add Settings button only in DMs
     if query.message.chat.type == "private":
         keyboard.append([InlineKeyboardButton("⚙️ Settings", callback_data="main_settings")])
 
-    # NEW: Add Admin Dashboard button for owner
+    # Row 5: Admin Dashboard (only for admin)
     if user.id == BOT_OWNER_ID:
-        keyboard.insert(0, [InlineKeyboardButton("👑 Admin Dashboard", callback_data="admin_dashboard")])
+        keyboard.append([InlineKeyboardButton("👑 Admin Dashboard", callback_data="admin_dashboard")])
 
     welcome_text = (
         f"🎰 <b>Welcome to Telegram Casino & Escrow Bot!</b> 🎰\n\n"
         f"👋 Hello {user.first_name}!\n\n"
         f"🎲 Experience the thrill of casino games or secure your trades with our automated Escrow system.\n"
         f"✨ NEW: Chat with our <b>AI Assistant</b> for any questions or tasks!\n"
-        f"💰 Current Balance: <b>${user_wallets.get(user.id, 0.0):.2f}</b>\n\n"
+        f"💰 Current Balance: <b>{formatted_balance}</b>\n\n"
         f"Choose an option below to get started:"
     )
 
@@ -1269,12 +1294,7 @@ async def games_category_callback(update: Update, context: ContextTypes.DEFAULT_
              InlineKeyboardButton("🏗️ Tower", callback_data="game_tower_start")],
             [InlineKeyboardButton("💣 Mines", callback_data="game_mines_start"),
              InlineKeyboardButton("🚀 Limbo", callback_data="game_limbo")],
-            [InlineKeyboardButton("🎯 Keno", callback_data="game_keno"),
-             InlineKeyboardButton("📉 Crash", callback_data="game_crash")],
-            [InlineKeyboardButton("🎪 Plinko", callback_data="game_plinko"),
-             InlineKeyboardButton("🎡 Wheel", callback_data="game_wheel")],
-            [InlineKeyboardButton("🎫 Scratch Card", callback_data="game_scratch"),
-             InlineKeyboardButton("🪙 Coin Toss Chain", callback_data="game_coin_chain")],
+            [InlineKeyboardButton("🎯 Keno", callback_data="game_keno")],
             [InlineKeyboardButton("🔙 Back to Categories", callback_data="main_games")]
         ]
     elif category == "emoji":
@@ -2574,14 +2594,12 @@ async def limbo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user_in_wallets(user.id, user.username, context=context)
     
     args = update.message.text.strip().split()
-    if len(args) != 3:
+    
+    # Show instructions only when no arguments provided
+    if len(args) == 1:
         await update.message.reply_text(
             "🚀 <b>LIMBO</b>\n\n"
-            "<b>Usage:</b> <code>/lb amount multiplier</code>\n\n"
-            "<b>Examples:</b>\n"
-            "• <code>/lb 10 2.00</code> - Bet $10 at 2x\n"
-            "• <code>/lb all 1.5</code> - Bet all at 1.5x\n\n"
-            "<b>How it works:</b>\n"
+            "<b>How to play:</b>\n"
             "• Choose your target multiplier (1.01 - 1000.00)\n"
             "• A random outcome is generated (1.00 - 1000.00)\n"
             "• If outcome ≥ your target: You win (bet × target)\n"
@@ -2590,7 +2608,18 @@ async def limbo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 2x = ~48% chance\n"
             "• 4x = ~24% chance\n"
             "• Higher multipliers = lower chance\n\n"
+            "<b>Usage:</b> <code>/lb amount multiplier</code>\n\n"
+            "<b>Examples:</b>\n"
+            "• <code>/lb 10 2.00</code> - Bet $10 at 2x\n"
+            "• <code>/lb all 1.5</code> - Bet all at 1.5x\n\n"
             f"<b>Min bet:</b> ${MIN_BALANCE:.2f}",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    if len(args) != 3:
+        await update.message.reply_text(
+            "Usage: <code>/lb amount multiplier</code>\nExample: <code>/lb 10 2.00</code>",
             parse_mode=ParseMode.HTML
         )
         return
@@ -4620,16 +4649,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         "• <b>Tower</b>: Use <code>/tr</code> or the Games menu\n"
         "• <b>Slots</b>: <code>/sl amount</code>\n"
         "• <b>Mines</b>: Use <code>/mines</code> or the Games menu\n"
-        "• <b>Limbo</b>: <code>/lb amount multiplier</code>\n"
+        "• <b>Limbo</b>: <code>/lb amount multiplier</code> or <code>/lb</code> for instructions\n"
         "• <b>Keno</b>: <code>/keno amount</code>\n"
         "• <b>Predict</b>: <code>/predict amount up/down</code>\n"
-        "💡 You can use 'all' instead of an amount to bet your entire balance!\n\n"
+        "💡 You can use 'all' instead of an amount to bet your entire balance!\n"
+        "💡 All amounts are in your selected currency (see Settings).\n\n"
         "<b>PvP & PvB Games:</b>\n"
         "• <b>Dice, Darts, Football, Bowling</b>\n"
         "  - vs Player: <code>/dice @user amount ftX</code>\n"
         "  - vs Bot: Use <code>/games</code> menu\n\n"
-        "<b>Wallet & Social:</b>\n"
+        "<b>Wallet & Withdrawals:</b>\n"
         "• <code>/deposit</code> or <code>/bal</code>\n"
+        "• Use the main menu for withdrawals (set withdrawal address in Settings first)\n"
         "• <code>/tip @user amount</code> or reply to a message\n"
         "• <code>/rain amount N</code> — Rain on N users\n"
         "• <code>/stats</code>, <code>/leaderboard</code>, <code>/leaderboardrf</code>\n\n"
@@ -4644,9 +4675,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         "• <code>/active</code> — View your active games\n"
         "• <code>/info &lt;id&gt;</code> — Get details of any game/deal\n"
         "• <code>/continue &lt;id&gt;</code> — Resume an active game\n\n"
-        "<b>⚙️ Other:</b>\n"
-        "• <code>/referral</code>, <code>/achievements</code>\n"
+        "<b>⚙️ Settings & Account:</b>\n"
+        "• <code>/referral</code>, <code>/achievements</code>, <code>/level</code>\n"
         "• <code>/language</code> — Change bot language (en/es)\n"
+        "• Use Settings menu to:\n"
+        "  - Set your withdrawal address (USDT-BEP20)\n"
+        "  - Change your display currency\n"
+        "  - Set up account recovery\n"
         "• <code>/recover</code> — Start the account recovery process\n\n"
         "<b>Group Management:</b>\n"
         "• Reply with <code>/kick</code>, <code>/mute</code>, <code>/promote</code>, <code>/pin</code>, <code>/purge</code>, <code>/report</code>, <code>/translate</code>\n"
@@ -4670,7 +4705,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         "• <code>/clearall</code> — ⚠️ Erase all user data\n"
         "• <code>/he</code> (all escrow), <code>/hc</code> (all games) — History cmds\n"
         "• <code>/fundgas &lt;addr&gt; &lt;amt&gt;</code> — Fund a deposit address\n"
-        "• <code>/export</code> — Export all user data as a JSON file."
+        "• <code>/export</code> — Export all user data as a JSON file.\n"
+        "• Approve/Cancel withdrawals via inline buttons in withdrawal notifications."
     )
 
     if is_owner:
@@ -6671,7 +6707,7 @@ async def active_all_navigation_callback(update: Update, context: ContextTypes.D
     await send_active_games_page(update, context)
 
 
-## NEW FEATURE - More Menu (Pagination Support) ##
+## NEW FEATURE - More Menu ##
 @check_maintenance
 async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     query = update.callback_query
@@ -6686,7 +6722,6 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
         ("🦄 Level", "main_level"),
         ("🤖 AI Assistant", "main_ai"),
         ("🎁 Daily Bonus", "main_daily"),
-        ("🎉 Bonuses & Rakeback", "main_bonuses"),
         ("🏆 Achievements", "main_achievements"),
         ("🆘 Support", "main_support"),
         ("❓ Help", "main_help"),
@@ -6696,34 +6731,18 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
         ("💱 Currency", "settings_currency"),
     ]
     
-    # Pagination: 10 items per page
-    items_per_page = 10
-    total_pages = (len(all_items) + items_per_page - 1) // items_per_page
-    start_idx = page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(all_items))
-    
     keyboard = []
-    # Add items for current page (2 per row)
-    for i in range(start_idx, end_idx, 2):
+    # Add all items (2 per row)
+    for i in range(0, len(all_items), 2):
         row = [InlineKeyboardButton(all_items[i][0], callback_data=all_items[i][1])]
-        if i + 1 < end_idx:
+        if i + 1 < len(all_items):
             row.append(InlineKeyboardButton(all_items[i + 1][0], callback_data=all_items[i + 1][1]))
         keyboard.append(row)
-    
-    # Add pagination buttons if needed
-    if total_pages > 1:
-        nav_row = []
-        if page > 0:
-            nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"more_page_{page - 1}"))
-        if page < total_pages - 1:
-            nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"more_page_{page + 1}"))
-        if nav_row:
-            keyboard.append(nav_row)
     
     # Back button
     keyboard.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")])
     
-    text = f"➕ <b>More Options</b>\n\nPage {page + 1}/{total_pages}\n\nSelect an option:"
+    text = f"➕ <b>More Options</b>\n\nSelect an option:"
     
     await query.edit_message_text(
         text,
@@ -6740,14 +6759,17 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔐 Recovery Token", callback_data="settings_recovery")],
         [InlineKeyboardButton("💱 Currency", callback_data="settings_currency")],
+        [InlineKeyboardButton("💳 Withdrawal Address", callback_data="settings_withdrawal")],
         [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")]
     ]
     
     user_currency = get_user_currency(user.id)
     currency_symbol = CURRENCY_SYMBOLS.get(user_currency, "$")
+    withdrawal_address = user_stats[user.id].get("withdrawal_address")
+    withdrawal_status = f"<b>Withdrawal Address:</b> {'✅ Set' if withdrawal_address else '❌ Not Set'}"
     
     await query.edit_message_text(
-        f"⚙️ <b>Settings</b>\n\nManage your account settings here.\n\n<b>Current Currency:</b> {user_currency} ({currency_symbol})",
+        f"⚙️ <b>Settings</b>\n\nManage your account settings here.\n\n<b>Current Currency:</b> {user_currency} ({currency_symbol})\n{withdrawal_status}",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -6756,7 +6778,7 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     user = query.from_user
-    action = query.data.split('_')[1]
+    action = query.data.split('_')[1] if len(query.data.split('_')) > 1 else None
 
     if action == "currency":
         current_currency = get_user_currency(user.id)
@@ -6777,6 +6799,32 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
+
+    if action == "withdrawal":
+        withdrawal_address = user_stats[user.id].get("withdrawal_address")
+        if withdrawal_address:
+            # Show current address and option to change
+            await query.edit_message_text(
+                f"💳 <b>Withdrawal Address</b>\n\n"
+                f"<b>Current Address:</b>\n<code>{withdrawal_address}</code>\n\n"
+                f"This is your USDT-BEP20 withdrawal address.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Change Address", callback_data="settings_withdrawal_change")],
+                    [InlineKeyboardButton("🔙 Back to Settings", callback_data="main_settings")]
+                ])
+            )
+            return
+        else:
+            # Ask user to set withdrawal address
+            await query.edit_message_text(
+                "💳 <b>Set Withdrawal Address</b>\n\n"
+                "Please enter your USDT-BEP20 withdrawal address.\n"
+                "⚠️ Make sure it's a valid BEP20 address.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="main_settings")]])
+            )
+            return SETTINGS_WITHDRAWAL_ADDRESS
 
     if action == "recovery":
         if user_stats[user.id].get("recovery_token_hash"):
@@ -6840,6 +6888,290 @@ async def set_recovery_pin_step(update: Update, context: ContextTypes.DEFAULT_TY
     fake_update.callback_query.data = 'main_settings'
     await settings_command(fake_update, context)
 
+    return ConversationHandler.END
+
+def is_valid_bep20_address(address: str) -> bool:
+    """Validate if address is a valid BEP20 (Ethereum-format) address"""
+    if not address or not address.startswith("0x"):
+        return False
+    if len(address) != 42:  # 0x + 40 hex chars
+        return False
+    try:
+        int(address[2:], 16)  # Check if it's valid hex
+        return True
+    except ValueError:
+        return False
+
+async def set_withdrawal_address_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    address = update.message.text.strip()
+
+    if not is_valid_bep20_address(address):
+        await update.message.reply_text(
+            "❌ Invalid USDT-BEP20 address. Please enter a valid address starting with 0x.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="main_settings")]])
+        )
+        return SETTINGS_WITHDRAWAL_ADDRESS
+
+    # Save the withdrawal address
+    user_stats[user.id]["withdrawal_address"] = address
+    save_user_data(user.id)
+
+    await update.message.reply_text(
+        f"✅ <b>Withdrawal Address Set!</b>\n\n"
+        f"Your withdrawal address has been saved:\n<code>{address}</code>\n\n"
+        f"You can now use the withdrawal feature.",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Return to settings menu
+    class FakeQuery:
+        def __init__(self, user, message): self.from_user = user; self.message = message
+        async def answer(self): pass
+        async def edit_message_text(self, *args, **kwargs): await message.reply_text(*args, **kwargs)
+    
+    fake_update = type('FakeUpdate', (), {'callback_query': FakeQuery(user, update.message)})()
+    fake_update.callback_query.data = 'main_settings'
+    await settings_command(fake_update, context)
+
+    return ConversationHandler.END
+
+async def withdrawal_change_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "💳 <b>Change Withdrawal Address</b>\n\n"
+        "Please enter your new USDT-BEP20 withdrawal address.\n"
+        "⚠️ Make sure it's a valid BEP20 address.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="main_settings")]])
+    )
+    return SETTINGS_WITHDRAWAL_ADDRESS_CHANGE
+
+async def change_withdrawal_address_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Same logic as set_withdrawal_address_step
+    return await set_withdrawal_address_step(update, context)
+
+# --- Withdrawal Request System ---
+async def process_withdrawal_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    amount_str = update.message.text.strip().lower()
+    
+    # Get user's currency and balance
+    user_currency = get_user_currency(user.id)
+    balance_usd = user_wallets.get(user.id, 0.0)
+    
+    try:
+        if amount_str == 'all':
+            amount_in_currency = convert_currency(balance_usd, user_currency)
+            amount_usd = balance_usd
+        else:
+            amount_in_currency = float(amount_str)
+            amount_usd = convert_to_usd(amount_in_currency, user_currency)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid amount. Please enter a valid number or 'all'.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_to_main")]])
+        )
+        return WITHDRAWAL_AMOUNT
+    
+    if amount_usd <= 0:
+        await update.message.reply_text(
+            "❌ Amount must be greater than 0.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_to_main")]])
+        )
+        return WITHDRAWAL_AMOUNT
+    
+    if amount_usd > balance_usd:
+        formatted_balance = format_currency(balance_usd, user_currency)
+        await update.message.reply_text(
+            f"❌ Insufficient balance. Your balance is {formatted_balance}.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_to_main")]])
+        )
+        return WITHDRAWAL_AMOUNT
+    
+    # Generate unique withdrawal ID
+    withdrawal_id = generate_unique_id("WD")
+    withdrawal_address = user_stats[user.id].get("withdrawal_address")
+    
+    # Create withdrawal request
+    withdrawal_requests[withdrawal_id] = {
+        "id": withdrawal_id,
+        "user_id": user.id,
+        "username": user.username or f"User_{user.id}",
+        "amount_usd": amount_usd,
+        "amount_currency": amount_in_currency,
+        "currency": user_currency,
+        "withdrawal_address": withdrawal_address,
+        "status": "pending",
+        "timestamp": str(datetime.now(timezone.utc)),
+        "txid": None
+    }
+    
+    # Deduct from user's balance
+    user_wallets[user.id] -= amount_usd
+    save_user_data(user.id)
+    
+    # Notify user
+    formatted_amount = format_currency(amount_usd, user_currency)
+    await update.message.reply_text(
+        f"✅ <b>Withdrawal Request Submitted</b>\n\n"
+        f"<b>Request ID:</b> <code>{withdrawal_id}</code>\n"
+        f"<b>Amount:</b> {formatted_amount}\n"
+        f"<b>Address:</b> <code>{withdrawal_address}</code>\n\n"
+        f"Your withdrawal request is currently pending review by the administrator.\n"
+        f"You will be notified once it's processed.",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Forward to owner
+    currency_symbol = CURRENCY_SYMBOLS.get(user_currency, "$")
+    try:
+        await context.bot.send_message(
+            chat_id=BOT_OWNER_ID,
+            text=(
+                f"💸 <b>New Withdrawal Request</b>\n\n"
+                f"<b>Request ID:</b> <code>{withdrawal_id}</code>\n"
+                f"<b>User:</b> @{user.username or user.id} (ID: {user.id})\n"
+                f"<b>Amount (USD):</b> ${amount_usd:.2f}\n"
+                f"<b>Amount ({user_currency}):</b> {currency_symbol}{amount_in_currency:.2f}\n"
+                f"<b>Address:</b> <code>{withdrawal_address}</code>\n"
+                f"<b>Status:</b> Pending"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Approve", callback_data=f"withdrawal_approve_{withdrawal_id}"),
+                 InlineKeyboardButton("❌ Cancel", callback_data=f"withdrawal_cancel_{withdrawal_id}")]
+            ])
+        )
+    except Exception as e:
+        logging.error(f"Failed to notify owner about withdrawal {withdrawal_id}: {e}")
+    
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def withdrawal_approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != BOT_OWNER_ID:
+        await query.answer("Only the owner can approve withdrawals.", show_alert=True)
+        return
+    
+    withdrawal_id = query.data.split("_")[-1]
+    withdrawal = withdrawal_requests.get(withdrawal_id)
+    
+    if not withdrawal:
+        await query.answer("Withdrawal request not found.", show_alert=True)
+        return
+    
+    if withdrawal["status"] != "pending":
+        await query.answer(f"This withdrawal has already been {withdrawal['status']}.", show_alert=True)
+        return
+    
+    # Ask for TXID
+    await query.edit_message_text(
+        f"💸 <b>Approve Withdrawal</b>\n\n"
+        f"<b>Request ID:</b> <code>{withdrawal_id}</code>\n\n"
+        f"Please enter the transaction hash (TXID) for this withdrawal:",
+        parse_mode=ParseMode.HTML
+    )
+    
+    context.user_data['withdrawal_approve_id'] = withdrawal_id
+    return WITHDRAWAL_APPROVAL_TXID
+
+async def withdrawal_txid_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txid = update.message.text.strip()
+    withdrawal_id = context.user_data.get('withdrawal_approve_id')
+    
+    if not withdrawal_id or withdrawal_id not in withdrawal_requests:
+        await update.message.reply_text("❌ Withdrawal request not found.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    withdrawal = withdrawal_requests[withdrawal_id]
+    
+    # Update withdrawal status
+    withdrawal["status"] = "approved"
+    withdrawal["txid"] = txid
+    withdrawal["approved_at"] = str(datetime.now(timezone.utc))
+    
+    # Notify user
+    currency_symbol = CURRENCY_SYMBOLS.get(withdrawal["currency"], "$")
+    try:
+        await context.bot.send_message(
+            chat_id=withdrawal["user_id"],
+            text=(
+                f"✅ <b>Withdrawal Approved</b>\n\n"
+                f"<b>Request ID:</b> <code>{withdrawal_id}</code>\n"
+                f"<b>Amount:</b> {currency_symbol}{withdrawal['amount_currency']:.2f}\n"
+                f"<b>Transaction Hash:</b> <code>{txid}</code>\n\n"
+                f"Your withdrawal has been processed successfully!"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logging.error(f"Failed to notify user about withdrawal approval: {e}")
+    
+    await update.message.reply_text(
+        f"✅ Withdrawal {withdrawal_id} approved and user notified."
+    )
+    
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def withdrawal_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != BOT_OWNER_ID:
+        await query.answer("Only the owner can cancel withdrawals.", show_alert=True)
+        return
+    
+    withdrawal_id = query.data.split("_")[-1]
+    withdrawal = withdrawal_requests.get(withdrawal_id)
+    
+    if not withdrawal:
+        await query.answer("Withdrawal request not found.", show_alert=True)
+        return
+    
+    if withdrawal["status"] != "pending":
+        await query.answer(f"This withdrawal has already been {withdrawal['status']}.", show_alert=True)
+        return
+    
+    # Return funds to user
+    user_id = withdrawal["user_id"]
+    amount_usd = withdrawal["amount_usd"]
+    user_wallets[user_id] = user_wallets.get(user_id, 0.0) + amount_usd
+    save_user_data(user_id)
+    
+    # Update withdrawal status
+    withdrawal["status"] = "cancelled"
+    withdrawal["cancelled_at"] = str(datetime.now(timezone.utc))
+    
+    # Notify user
+    currency_symbol = CURRENCY_SYMBOLS.get(withdrawal["currency"], "$")
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"❌ <b>Withdrawal Cancelled</b>\n\n"
+                f"<b>Request ID:</b> <code>{withdrawal_id}</code>\n"
+                f"<b>Amount:</b> {currency_symbol}{withdrawal['amount_currency']:.2f}\n\n"
+                f"Your withdrawal request has been cancelled by the administrator.\n"
+                f"The funds have been returned to your balance.\n\n"
+                f"For more information, please contact support @jashanxjagy."
+            ),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logging.error(f"Failed to notify user about withdrawal cancellation: {e}")
+    
+    await query.edit_message_text(
+        f"❌ Withdrawal {withdrawal_id} cancelled. Funds returned to user's balance."
+    )
+    
     return ConversationHandler.END
 
 
@@ -7187,6 +7519,40 @@ def main():
         conversation_timeout=timedelta(minutes=3).total_seconds()
     )
 
+    withdrawal_address_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(settings_callback_handler, pattern="^settings_withdrawal$"),
+            CallbackQueryHandler(withdrawal_change_callback, pattern="^settings_withdrawal_change$")
+        ],
+        states={
+            SETTINGS_WITHDRAWAL_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_withdrawal_address_step)],
+            SETTINGS_WITHDRAWAL_ADDRESS_CHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, change_withdrawal_address_step)]
+        },
+        fallbacks=[CallbackQueryHandler(settings_command, pattern="^main_settings$")],
+        per_user=True,
+        conversation_timeout=timedelta(minutes=2).total_seconds()
+    )
+
+    withdrawal_flow_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(main_menu_callback, pattern="^main_withdraw$")],
+        states={
+            WITHDRAWAL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_withdrawal_amount)]
+        },
+        fallbacks=[CallbackQueryHandler(start_command_inline, pattern="^back_to_main$")],
+        per_user=True,
+        conversation_timeout=timedelta(minutes=3).total_seconds()
+    )
+
+    withdrawal_approval_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(withdrawal_approve_callback, pattern="^withdrawal_approve_")],
+        states={
+            WITHDRAWAL_APPROVAL_TXID: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdrawal_txid_step)]
+        },
+        fallbacks=[],
+        per_user=True,
+        conversation_timeout=timedelta(minutes=10).total_seconds()
+    )
+
 
     app.add_handler(CommandHandler("start", start_command, block=False))
     app.add_handler(CommandHandler("help", help_command))
@@ -7237,12 +7603,7 @@ def main():
     app.add_handler(CommandHandler("rk", rakeback_command)) # NEW
     app.add_handler(CommandHandler("level", level_command)) # NEW
     app.add_handler(CommandHandler("levelall", level_all_command)) # NEW
-    # NEW GAMES
-    app.add_handler(CommandHandler("crash", crash_command))
-    app.add_handler(CommandHandler("plinko", plinko_command))
-    app.add_handler(CommandHandler("wheel", wheel_command))
-    app.add_handler(CommandHandler("scratch", scratch_command))
-    app.add_handler(CommandHandler("coinchain", coinchain_command))
+    # REMOVED NEW GAMES: crash, plinko, wheel, scratch, coinchain
     # New Group Management Commands
     app.add_handler(CommandHandler("mute", mute_command))
     app.add_handler(CommandHandler("report", report_command))
@@ -7257,6 +7618,9 @@ def main():
     app.add_handler(ai_handler)
     app.add_handler(recovery_settings_handler)
     app.add_handler(recovery_handler)
+    app.add_handler(withdrawal_address_handler)
+    app.add_handler(withdrawal_flow_handler)
+    app.add_handler(withdrawal_approval_handler)
 
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^(main_|back_to_main|my_matches|my_deals)"))
     app.add_handler(CallbackQueryHandler(games_category_callback, pattern=r"^games_category_")) # NEW
@@ -7276,6 +7640,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_user_search_callback, pattern=r"^admin_user_"))
     app.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=r"^settings_"))
     app.add_handler(CallbackQueryHandler(active_all_navigation_callback, pattern=r"^activeall_"))
+    app.add_handler(CallbackQueryHandler(withdrawal_cancel_callback, pattern=r"^withdrawal_cancel_")) # NEW - Withdrawal cancellation
 
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_listener))
