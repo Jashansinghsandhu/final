@@ -125,6 +125,25 @@ def format_currency(amount_usd, currency="USD"):
     symbol = CURRENCY_SYMBOLS.get(currency, "$")
     return f"{symbol}{converted:,.2f}"
 
+def parse_bet_amount(amount_str: str, user_id: int) -> tuple:
+    """
+    Parse bet amount from user input and convert to USD.
+    Returns (amount_in_usd, amount_in_user_currency, user_currency)
+    """
+    user_currency = get_user_currency(user_id)
+    balance_usd = user_wallets.get(user_id, 0.0)
+    
+    amount_str = amount_str.lower().strip()
+    
+    if amount_str == 'all':
+        amount_usd = balance_usd
+        amount_in_currency = convert_currency(balance_usd, user_currency)
+    else:
+        amount_in_currency = float(amount_str)
+        amount_usd = convert_to_usd(amount_in_currency, user_currency)
+    
+    return amount_usd, amount_in_currency, user_currency
+
 def get_user_currency(user_id):
     """Get user's preferred currency"""
     return user_stats.get(user_id, {}).get("userinfo", {}).get("currency", "USD")
@@ -1640,28 +1659,28 @@ async def blackjack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.strip().split()
     await ensure_user_in_wallets(user.id, user.username, context=context)
 
+    user_currency = get_user_currency(user.id)
+    formatted_balance = format_currency(user_wallets.get(user.id, 0.0), user_currency)
+
     if len(args) != 2:
-        await update.message.reply_text("Usage: /bj amount\nExample: /bj 5 or /bj all")
+        await update.message.reply_text(f"Usage: /bj amount\nExample: /bj 5 or /bj all\nYour balance: {formatted_balance}")
         return
 
     try:
-        bet_amount_str = args[1].lower()
-        if bet_amount_str == 'all':
-            bet_amount = user_wallets.get(user.id, 0.0)
-        else:
-            bet_amount = float(bet_amount_str)
+        bet_amount_str = args[1]
+        bet_amount_usd, bet_amount_currency, currency = parse_bet_amount(bet_amount_str, user.id)
     except ValueError:
-        await update.message.reply_text("Invalid amount.")
+        await update.message.reply_text("Invalid amount. Please enter a valid number or 'all'.")
         return
 
-    if not await check_bet_limits(update, bet_amount, 'blackjack'):
+    if not await check_bet_limits(update, bet_amount_usd, 'blackjack'):
         return
 
-    if user_wallets.get(user.id, 0.0) < bet_amount:
-        await update.message.reply_text("You don't have enough balance.")
+    if user_wallets.get(user.id, 0.0) < bet_amount_usd:
+        await update.message.reply_text(f"You don't have enough balance. Your balance: {formatted_balance}")
         return
 
-    user_wallets[user.id] -= bet_amount
+    user_wallets[user.id] -= bet_amount_usd
     save_user_data(user.id)
 
     deck = create_deck()
@@ -1676,7 +1695,9 @@ async def blackjack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "id": game_id,
         "game_type": "blackjack",
         "user_id": user.id,
-        "bet_amount": bet_amount,
+        "bet_amount": bet_amount_usd,
+        "bet_amount_currency": bet_amount_currency,
+        "currency": currency,
         "status": "active",
         "timestamp": str(datetime.now(timezone.utc)),
         "deck": deck,
@@ -1698,28 +1719,32 @@ async def blackjack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     hand_text = format_hand("Your hand", player_hand, player_value)
     dealer_text = f"Dealer shows: {dealer_show_card}\n"
+    
+    currency_symbol = CURRENCY_SYMBOLS.get(currency, "$")
+    formatted_bet = f"{currency_symbol}{bet_amount_currency:.2f}"
 
     if player_value == 21:
         dealer_value = calculate_hand_value(dealer_hand)
         game_sessions[game_id]['status'] = 'completed'
         game_sessions[game_id]['win'] = True
         if dealer_value == 21:
-            user_wallets[user.id] += bet_amount
+            user_wallets[user.id] += bet_amount_usd
             save_user_data(user.id)
             await update.message.reply_text(
                 f"{hand_text}\n{format_hand('Dealer hand', dealer_hand, dealer_value)}\n"
-                f"🤝 Push! Both have blackjack. Bet returned.\nGame ID: <code>{game_id}</code>",
+                f"🤝 Push! Both have blackjack. Bet returned: {formatted_bet}\nGame ID: <code>{game_id}</code>",
                 parse_mode=ParseMode.HTML
             )
         else:
-            winnings = bet_amount * 2.5
-            user_wallets[user.id] += winnings
-            update_stats_on_bet(user.id, game_id, bet_amount, True, multiplier=2.5, context=context)
+            winnings_usd = bet_amount_usd * 2.5
+            winnings_currency = bet_amount_currency * 2.5
+            user_wallets[user.id] += winnings_usd
+            update_stats_on_bet(user.id, game_id, bet_amount_usd, True, multiplier=2.5, context=context)
             update_pnl(user.id)
             save_user_data(user.id)
             await update.message.reply_text(
                 f"{hand_text}\n{dealer_text}\n"
-                f"🎉 Blackjack! You win ${winnings:.2f}!\nGame ID: <code>{game_id}</code>",
+                f"🎉 Blackjack! You win {currency_symbol}{winnings_currency:.2f}!\nGame ID: <code>{game_id}</code>",
                 parse_mode=ParseMode.HTML
             )
         return
@@ -1729,13 +1754,13 @@ async def blackjack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("✋ Stand", callback_data=f"bj_stand_{game_id}")],
     ]
 
-    if len(player_hand) == 2 and user_wallets.get(user.id, 0.0) >= bet_amount:
+    if len(player_hand) == 2 and user_wallets.get(user.id, 0.0) >= bet_amount_usd:
         keyboard.append([InlineKeyboardButton("⬆️ Double Down", callback_data=f"bj_double_{game_id}")])
 
     await update.message.reply_text(
         f"🃏 <b>Blackjack Started!</b> (ID: <code>{game_id}</code>)\n\n"
         f"{hand_text}\n{dealer_text}\n"
-        f"💰 Bet: ${bet_amount:.2f}",
+        f"💰 Bet: {formatted_bet}",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
